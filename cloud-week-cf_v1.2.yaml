@@ -1,0 +1,678 @@
+#
+# jhshin@amazon.com
+#
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: AWS Cloud Week
+
+#Parameters:
+  SSHKey:
+    Description: The keypair that will be used to allow SSH access to the "on-prem" server
+    Type: AWS::EC2::KeyPair::KeyName
+
+# Mappings
+Mappings:
+  RegionalSettings:
+    ap-northeast-2:
+      clientAmi: ami-08ab3f7e72215fe91
+      clientType: t3.micro
+      name: Seoul
+  NetworkSettings:
+    global:
+      onPremVpcCidr: 10.10.0.0/16
+      onPremSubPubCidr: 10.10.10.0/24
+      onPremSubPriCidr: 10.10.20.0/24
+      onPremSubAttCidr: 10.10.30.0/24
+      onPremServerPubIpAddress: 10.10.10.100
+      onPremServerPriIpAddress: 10.10.20.100
+      awsVpcCidr: 10.11.0.0/16
+      awsSubPubCidr: 10.11.10.0/24
+      awsSubPriCidr: 10.11.20.0/24
+      awsSubAttCidr: 10.11.30.0/24
+      awsServerPubIpAddress: 10.11.10.100
+      awsServerPriIpAddress: 10.11.20.100
+      vpcPeeringCidr: 10.0.0.0/8
+      vpcLocalCidr: 10.0.0.0/8
+
+Resources:
+
+# On-Prem VPC
+  OnPremVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [ NetworkSettings, global, onPremVpcCidr ]
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        -
+          Key: "Name"
+          Value: "On-Prem VPC"
+
+# Public Subnet
+  OnPremPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !FindInMap [ NetworkSettings, global, onPremSubPubCidr ]
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref OnPremVPC
+      Tags:
+        -
+          Key: "Name"
+          Value: "On-Prem Public Subnet"
+
+# Private Subnet
+  OnPremPrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !FindInMap [ NetworkSettings, global, onPremSubPriCidr ]
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref OnPremVPC
+      Tags:
+        -
+          Key: "Name"
+          Value: "On-Prem Private Subnet"
+
+# SSM Attach Subnet
+  OnPremAttachSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OnPremVPC
+      CidrBlock: !FindInMap [ NetworkSettings, global, onPremSubAttCidr ]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: "On-Prem Attach Subnet"
+
+# Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: On-Prem Internet Gateway
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref OnPremVPC
+
+# NAT EIP
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: OnPremVPC
+
+# NAT Gateway
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref OnPremPrivateSubnet
+      Tags:
+        - Key: Name
+          Value: On-Prem NAT Gateway
+
+# Public Route Table
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref OnPremVPC
+      Tags:
+        - Key: Name
+          Value: On-Prem Public Subnet Routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PeeringRoute0:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: !FindInMap [ NetworkSettings, global, vpcPeeringCidr ]
+      RouteTableId: !Ref PublicRouteTable
+      VpcPeeringConnectionId: !Ref VPCPeeringConnection
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref OnPremPublicSubnet
+
+# Private Route Table
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref OnPremVPC
+      Tags:
+        - Key: Name
+          Value: On-Prem Private Subnet Routes
+
+  DefaultPrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PeeringRoute1:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: !FindInMap [ NetworkSettings, global, vpcPeeringCidr ]
+      RouteTableId: !Ref PrivateRouteTable
+      VpcPeeringConnectionId: !Ref VPCPeeringConnection
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref OnPremPrivateSubnet
+
+# Attach Route Table
+  AttachRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref OnPremVPC
+      Tags:
+        - Key: Name
+          Value: On-Prem Attach Subnet Routes
+
+  AttachSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref AttachRouteTable
+      SubnetId: !Ref OnPremAttachSubnet
+
+# Instance Security Group
+  OnPremSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: On-prem VPC Security Group
+      GroupName: OnPremSG-Servers
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          CidrIp: !FindInMap [ NetworkSettings, global, vpcLocalCidr ]
+          FromPort: 22
+          ToPort: 22
+        - IpProtocol: icmp
+          CidrIp: !FindInMap [ NetworkSettings, global, vpcLocalCidr ]
+          FromPort: "-1"
+          ToPort: "-1"
+      VpcId: !Ref OnPremVPC
+      Tags:
+        -
+          Key: "Name"
+          Value: On-Prem Servers Security Group
+  OnPremSGIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref OnPremSG
+      IpProtocol: -1
+      SourceSecurityGroupId: !GetAtt OnPremSG.GroupId
+
+# Aurora Security Group
+  AuroraSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: On-prem Aurora Security Group
+      GroupName: AuroraSG
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          SourceSecurityGroupId: !GetAtt OnPremSG.GroupId
+          FromPort: 3306
+          ToPort: 3306
+      VpcId: !Ref OnPremVPC
+      Tags:
+        -
+          Key: "Name"
+          Value: On-Prem Aurora Security Group
+  AuroraSGIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AuroraSG
+      IpProtocol: -1
+      SourceSecurityGroupId: !GetAtt AuroraSG.GroupId
+
+# Endpoint Security Group
+  EndpointSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Open-up ports for All Network
+      GroupName: OnPremSG-Endpoints
+      VpcId: !Ref OnPremVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "0"
+          ToPort: "65535"
+          CidrIp: !FindInMap [ NetworkSettings, global, vpcLocalCidr ]
+        - IpProtocol: udp
+          FromPort: "0"
+          ToPort: "65535"
+          CidrIp: !FindInMap [ NetworkSettings, global, vpcLocalCidr ]
+      Tags:
+        - Key: Name
+          Value: On-Prem Endpoints Security Group
+
+# ssm, ssmmessages Endpoints
+  SSMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref OnPremVPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: True
+      SubnetIds:
+        - Ref: OnPremAttachSubnet
+      SecurityGroupIds:
+        - Ref: EndpointSG
+
+  SSMMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref OnPremVPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: True
+      SubnetIds:
+        - Ref: OnPremAttachSubnet
+      SecurityGroupIds:
+        - Ref: EndpointSG      
+
+# Session Manager ServerRole
+  EC2ServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: On-Prem-SSMRole
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref EC2ServerRole
+
+  OnPremServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      AvailabilityZone: !GetAtt OnPremPublicSubnet.AvailabilityZone
+#      AvailabilityZone: !GetAtt OnPremPrivateSubnet.AvailabilityZone
+      ImageId: !FindInMap [ RegionalSettings, !Ref "AWS::Region", clientAmi ]
+      InstanceType: !FindInMap [ RegionalSettings, !Ref "AWS::Region", clientType ]
+      PrivateIpAddress: !FindInMap [ NetworkSettings, global, onPremServerPubIpAddress ]
+#      PrivateIpAddress: !FindInMap [ NetworkSettings, global, onPremServerPriIpAddress ]
+      KeyName: !Ref SSHKey
+      SecurityGroupIds:
+        - !GetAtt OnPremSG.GroupId
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref OnPremPublicSubnet
+#      SubnetId: !Ref OnPremPrivateSubnet
+      Tags:
+        -
+          Key: "Name"
+          Value: !Sub OnPrem-Server
+      BlockDeviceMappings: 
+        - DeviceName: "/dev/xvda"
+          Ebs: 
+            VolumeType: "gp2"
+            VolumeSize: "20"
+            DeleteOnTermination: "false"
+            Encrypted: "false"
+
+# AWS VPC
+  AWSVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [ NetworkSettings, global, awsVpcCidr ]
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        -
+          Key: "Name"
+          Value: "AWS VPC"
+
+# Public Subnet
+  AWSPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !FindInMap [ NetworkSettings, global, awsSubPubCidr ]
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref AWSVPC
+      Tags:
+        -
+          Key: "Name"
+          Value: "AWS Public Subnet"
+
+# Private Subnet
+  AWSPrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !FindInMap [ NetworkSettings, global, awsSubPriCidr ]
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref AWSVPC
+      Tags:
+        -
+          Key: "Name"
+          Value: "AWS Private Subnet"
+
+# SSM Attach Subnet
+  AWSAttachSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref AWSVPC
+      CidrBlock: !FindInMap [ NetworkSettings, global, awsSubAttCidr ]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: "AWS Attach Subnet"
+
+# Internet Gateway
+  AWSInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: AWS Internet Gateway
+
+  AWSInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref AWSInternetGateway
+      VpcId: !Ref AWSVPC
+
+# NAT EIP
+  AWSNatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AWSInternetGatewayAttachment
+    Properties:
+      Domain: AWSVPC
+
+# NAT Gateway
+  AWSNatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt AWSNatGatewayEIP.AllocationId
+      SubnetId: !Ref AWSPrivateSubnet
+      Tags:
+        - Key: Name
+          Value: AWS NAT Gateway
+
+# Public Route Table
+  AWSPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref AWSVPC
+      Tags:
+        - Key: Name
+          Value: AWS Public Subnet Routes
+
+  AWSDefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AWSInternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref AWSPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref AWSInternetGateway
+
+  AWSPeeringRoute0:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: !FindInMap [ NetworkSettings, global, vpcPeeringCidr ]
+      RouteTableId: !Ref AWSPublicRouteTable
+      VpcPeeringConnectionId: !Ref VPCPeeringConnection
+
+  AWSPublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref AWSPublicRouteTable
+      SubnetId: !Ref AWSPublicSubnet
+
+# Private Route Table
+  AWSPrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref AWSVPC
+      Tags:
+        - Key: Name
+          Value: AWS Private Subnet Routes
+
+  AWSDefaultPrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref AWSPrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref AWSNatGateway
+
+  AWSPeeringRoute1:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: !FindInMap [ NetworkSettings, global, vpcPeeringCidr ]
+      RouteTableId: !Ref AWSPrivateRouteTable
+      VpcPeeringConnectionId: !Ref VPCPeeringConnection
+
+  AWSPrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref AWSPrivateRouteTable
+      SubnetId: !Ref AWSPrivateSubnet
+
+# Attach Route Table
+  AWSAttachRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref AWSVPC
+      Tags:
+        - Key: Name
+          Value: AWS Attach Subnet Routes
+
+  AWSAttachSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref AWSAttachRouteTable
+      SubnetId: !Ref AWSAttachSubnet
+
+# Instance Security Group
+  AWSSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: AWS VPC Security Group
+      GroupName: AWSSG-Servers
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          CidrIp: !FindInMap [ NetworkSettings, global, vpcLocalCidr ]
+          FromPort: 22
+          ToPort: 22
+        - IpProtocol: icmp
+          CidrIp: !FindInMap [ NetworkSettings, global, vpcLocalCidr ]
+          FromPort: "-1"
+          ToPort: "-1"
+      VpcId: !Ref AWSVPC
+      Tags:
+        -
+          Key: "Name"
+          Value: AWS Servers Security Group
+  AWSSGIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AWSSG
+      IpProtocol: -1
+      SourceSecurityGroupId: !GetAtt AWSSG.GroupId
+
+## Aurora Security Group
+#  AuroraSG:
+#    Type: AWS::EC2::SecurityGroup
+#    Properties:
+#      GroupDescription: On-prem Aurora Security Group
+#      GroupName: AuroraSG
+#      SecurityGroupIngress:
+#        - IpProtocol: tcp
+#          SourceSecurityGroupId: !GetAtt OnPremSG.GroupId
+#          FromPort: 3306
+#          ToPort: 3306
+#      VpcId: !Ref OnPremVPC
+#      Tags:
+#        -
+#          Key: "Name"
+#          Value: On-Prem Aurora Security Group
+#  AuroraSGIngress:
+#    Type: AWS::EC2::SecurityGroupIngress
+#    Properties:
+#      GroupId: !Ref AuroraSG
+#      IpProtocol: -1
+#      SourceSecurityGroupId: !GetAtt AuroraSG.GroupId
+
+# Endpoint Security Group
+  AWSEndpointSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Open-up ports for All Network
+      GroupName: AWSSG-Endpoints
+      VpcId: !Ref AWSVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "0"
+          ToPort: "65535"
+          CidrIp: !FindInMap [ NetworkSettings, global, vpcLocalCidr ]
+        - IpProtocol: udp
+          FromPort: "0"
+          ToPort: "65535"
+          CidrIp: !FindInMap [ NetworkSettings, global, vpcLocalCidr ]
+      Tags:
+        - Key: Name
+          Value: AWS Endpoints Security Group
+
+# ssm, ssmmessages Endpoints
+  AWSSSMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref AWSVPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: True
+      SubnetIds:
+        - Ref: AWSAttachSubnet
+      SecurityGroupIds:
+        - Ref: AWSEndpointSG
+
+  AWSSSMMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref AWSVPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: True
+      SubnetIds:
+        - Ref: AWSAttachSubnet
+      SecurityGroupIds:
+        - Ref: AWSEndpointSG      
+
+# Session Manager ServerRole
+  AWSEC2ServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AWS-SSMRole
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  AWSInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref AWSEC2ServerRole
+
+  AWSServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      AvailabilityZone: !GetAtt AWSPublicSubnet.AvailabilityZone
+#      AvailabilityZone: !GetAtt AWSPrivateSubnet.AvailabilityZone
+      ImageId: !FindInMap [ RegionalSettings, !Ref "AWS::Region", clientAmi ]
+      InstanceType: !FindInMap [ RegionalSettings, !Ref "AWS::Region", clientType ]
+      PrivateIpAddress: !FindInMap [ NetworkSettings, global, awsServerPubIpAddress ]
+#      PrivateIpAddress: !FindInMap [ NetworkSettings, global, awsServerPriIpAddress ]
+      KeyName: !Ref SSHKey
+      SecurityGroupIds:
+        - !GetAtt AWSSG.GroupId
+      IamInstanceProfile: !Ref AWSInstanceProfile
+      SubnetId: !Ref AWSPublicSubnet
+#      SubnetId: !Ref AWSPrivateSubnet
+      Tags:
+        -
+          Key: "Name"
+          Value: !Sub AWS-Server
+      BlockDeviceMappings: 
+        - DeviceName: "/dev/xvda"
+          Ebs: 
+            VolumeType: "gp2"
+            VolumeSize: "20"
+            DeleteOnTermination: "false"
+            Encrypted: "false"
+
+# VPC Peering
+  VPCPeeringConnection:
+    Type: 'AWS::EC2::VPCPeeringConnection'
+    Properties:
+      VpcId: !Ref OnPremVPC
+      PeerVpcId: !Ref AWSVPC
+
+#Outputs
+Outputs:
+  sourceVpcId:
+    Description: "Source VPC (On-Prem)"
+    Value: !Ref OnPremVPC
+  sourceVpcCidr:
+    Description: "Source VPC CidrBlock"
+    Value: !FindInMap [ NetworkSettings, global, onPremVpcCidr ]
+  sourceVpcBastionServer:
+    Description: "Bastion(EC2 Workstation) Server ID"
+    Value: !Ref OnPremServer
+  sourceVpcBastionServerPrivateIp:
+    Description: "Bastion Server Private IP Address"
+    Value: !GetAtt OnPremServer.PrivateIp
+  sourceVpcBastionServerPublicIp:
+    Description: "Bastion Server Public IP Address"
+    Value: !GetAtt OnPremServer.PublicIp
+#    Export:
+#     Name: !Sub "${AWS::StackName}-PublicIp"
+  targetVpcId:
+    Description: "Target VPC (AWS)"
+    Value: !Ref AWSVPC
+  targetVpcCidr:
+    Description: "Target VPC CidrBlock"
+    Value: !FindInMap [ NetworkSettings, global, awsVpcCidr ]
+  vpcPeeringId:
+    Description: "VPC Peering ID"
+    Value: !Ref VPCPeeringConnection
+  sourceVpcAuroraSecurityGroup:
+    Description: "Aurora Security Group"
+    Value: !Ref AuroraSG
+
+
