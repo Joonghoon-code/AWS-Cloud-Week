@@ -6,9 +6,10 @@ AWSTemplateFormatVersion: 2010-09-09
 Description: AWS Cloud Week
 
 #Parameters:
-#  SSHKey:
-#    Description: The keypair that will be used to allow SSH access to the "on-prem" server
-#    Type: AWS::EC2::KeyPair::KeyName
+Parameters:
+  SSHKey:
+    Description: The keypair that will be used to allow SSH access to the "aws" server
+    Type: AWS::EC2::KeyPair::KeyName
 
 # Mappings
 Mappings:
@@ -318,7 +319,7 @@ Resources:
       InstanceType: !FindInMap [ RegionalSettings, !Ref "AWS::Region", clientType ]
       PrivateIpAddress: !FindInMap [ NetworkSettings, global, onPremServerPubIpAddress ]
 #      PrivateIpAddress: !FindInMap [ NetworkSettings, global, onPremServerPriIpAddress ]
-#      KeyName: !Ref SSHKey
+      KeyName: !Ref SSHKey
       SecurityGroupIds:
         - !GetAtt OnPremSG.GroupId
       IamInstanceProfile: !Ref InstanceProfile
@@ -618,7 +619,7 @@ Resources:
       InstanceType: !FindInMap [ RegionalSettings, !Ref "AWS::Region", clientType ]
       PrivateIpAddress: !FindInMap [ NetworkSettings, global, awsServerPubIpAddress ]
 #      PrivateIpAddress: !FindInMap [ NetworkSettings, global, awsServerPriIpAddress ]
-#      KeyName: !Ref SSHKey
+      KeyName: !Ref SSHKey
       SecurityGroupIds:
         - !GetAtt AWSSG.GroupId
       IamInstanceProfile: !Ref AWSInstanceProfile
